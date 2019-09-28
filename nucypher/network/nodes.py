@@ -54,7 +54,7 @@ from nucypher.blockchain.eth.agents import ContractAgency, StakingEscrowAgent
 from nucypher.blockchain.eth.interfaces import BlockchainInterface
 from nucypher.blockchain.eth.registry import BaseContractRegistry
 from nucypher.config.constants import SeednodeMetadata
-from nucypher.config.storages import ForgetfulNodeStorage
+from nucypher.storage.node import ForgetfulNodeStorage
 from nucypher.crypto.api import keccak_digest, verify_eip_191, recover_address_eip_191
 from nucypher.crypto.constants import PUBLIC_ADDRESS_LENGTH
 from nucypher.crypto.kits import UmbralMessageKit

@@ -189,7 +189,6 @@ class BaseContractDeployer:
                                                         enrollment_version='latest')
         return contract
 
-
 class OwnableContractMixin:
 
     _ownable = True
