@@ -43,6 +43,7 @@ from bytestring_splitter import BytestringKwargifier, BytestringSplittingError
 from bytestring_splitter import BytestringSplitter, VariableLengthBytestring
 from constant_sorrow import constants
 from constant_sorrow.constants import INCLUDED_IN_BYTESTRING, PUBLIC_ONLY, STRANGER_ALICE
+from constant_sorrow.constants import NO_DECRYPTION_PERFORMED
 from nucypher.blockchain.eth.actors import BlockchainPolicyAuthor, Worker
 from nucypher.blockchain.eth.agents import StakingEscrowAgent, ContractAgency
 from nucypher.blockchain.eth.registry import BaseContractRegistry
@@ -348,7 +349,12 @@ class Alice(Character, BlockchainPolicyAuthor):
         dict as a key, and the revocation and Ursula's response is added as
         a value.
         """
-        revocation_kit = RevocationKit(policy.treasure_map, self.stamp)
+
+        # TODO
+        if policy.treasure_map is not NO_DECRYPTION_PERFORMED:
+            revocation_kit = RevocationKit.from_treasure_map(treasure_map=policy.treasure_map, signer=self.stamp)
+        else:
+            revocation_kit = RevocationKit.from_policy(policy=policy, signer=self.stamp)
 
         try:
             # Wait for a revocation threshold of nodes to be known ((n - m) + 1)
@@ -373,7 +379,8 @@ class Alice(Character, BlockchainPolicyAuthor):
                     failed_revocations[node_id] = (revocation, UnexpectedResponse)
                 else:
                     if response.status_code != 200:
-                        raise self.ActorError(f"Failed to revoke from {node_id} with status code {response.status_code}")
+                        raise self.ActorError(
+                            f"Failed to revoke from {node_id} with status code {response.status_code}")
 
         if not self.federated_only:
             receipt = self.revoke_policy(policy_id=policy.id)
@@ -736,11 +743,11 @@ class Bob(Character):
                  alice_verifying_key: UmbralPublicKey,
                  label: bytes,
                  enrico: "Enrico" = None,
-                 retain_cfrags: bool=False,
-                 use_attached_cfrags: bool=False,
-                 use_precedent_work_orders: bool=False,
-                 policy_encrypting_key: UmbralPublicKey=None,
-                 treasure_map: Union['TreasureMap', bytes]=None):
+                 retain_cfrags: bool = False,
+                 use_attached_cfrags: bool = False,
+                 use_precedent_work_orders: bool = False,
+                 policy_encrypting_key: UmbralPublicKey = None,
+                 treasure_map: Union['TreasureMap', bytes] = None):
 
         # Try our best to get an UmbralPublicKey from input
         alice_verifying_key = UmbralPublicKey.from_bytes(bytes(alice_verifying_key))
@@ -808,7 +815,8 @@ class Bob(Character):
                         cfrag_in_question = work_order.tasks[capsule].cfrag
                         capsule.attach_cfrag(cfrag_in_question)
                 else:
-                    self.log.warn("Found existing complete WorkOrders, but use_precedent_work_orders is set to False.  To use Bob in 'KMS mode', set retain_cfrags=False as well.")
+                    self.log.warn(
+                        "Found existing complete WorkOrders, but use_precedent_work_orders is set to False.  To use Bob in 'KMS mode', set retain_cfrags=False as well.")
 
         # Part II: Getting the cleartexts.
         cleartexts = []
