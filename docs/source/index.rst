@@ -159,6 +159,7 @@ Whitepapers
 
    api/characters
    api/config
+   api/storages
    api/crypto
    api/keyring
    api/keystore
