@@ -18,11 +18,8 @@ along with nucypher.  If not, see <https://www.gnu.org/licenses/>.
 import pytest
 
 from nucypher.characters.lawful import Ursula
-from nucypher.config.storages import (
-    ForgetfulNodeStorage,
-    SQLiteForgetfulNodeStorage,
-    TemporaryFileBasedNodeStorage,
-    NodeStorage)
+from nucypher.storage.node import NodeStorage, ForgetfulNodeStorage, SQLiteForgetfulNodeStorage, \
+    TemporaryFileBasedNodeStorage
 from nucypher.utilities.sandbox.constants import (
     MOCK_URSULA_DB_FILEPATH,
     MOCK_URSULA_STARTING_PORT)
@@ -53,7 +50,7 @@ class BaseTestNodeStorageBackends:
 
         # Save more nodes
         all_known_nodes = set()
-        for port in range(MOCK_URSULA_STARTING_PORT, MOCK_URSULA_STARTING_PORT+100):
+        for port in range(MOCK_URSULA_STARTING_PORT, MOCK_URSULA_STARTING_PORT + 100):
             node = Ursula(rest_host='127.0.0.1', db_filepath=MOCK_URSULA_DB_FILEPATH, rest_port=port,
                           federated_only=True)
             node_storage.store_node_metadata(node=node)
