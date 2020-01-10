@@ -94,7 +94,6 @@ class Alice(Character, BlockchainPolicyAuthor):
                  # Policy Value
                  rate: int = None,
                  duration_periods: int = None,
-                 first_period_reward: int = 0,
 
                  # Policy Credentials
                  credential_storage: 'PolicyCredentialStorage' = None,
@@ -139,7 +138,6 @@ class Alice(Character, BlockchainPolicyAuthor):
                                             registry=self.registry,
                                             rate=rate,
                                             duration_periods=duration_periods,
-                                            first_period_reward=first_period_reward,
                                             checksum_address=checksum_address)
 
         if is_me and controller:

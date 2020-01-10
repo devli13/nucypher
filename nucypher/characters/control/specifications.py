@@ -63,21 +63,21 @@ class CharacterSpecification(ABC):
 
     def validate_response(self, interface_name: str, response: dict) -> bool:
         _, _, output_specification = self.get_specifications(interface_name=interface_name)
-        return self.__validate(specification=output_specification, data=response, error_class=self.InvalidOutputField)
+        return self.__validate(specification=output_specification, data=response, error_class=self.InvalidInputField)
 
 
 class AliceSpecification(CharacterSpecification):
 
     __create_policy = {'input': ('bob_encrypting_key', 'bob_verifying_key', 'm', 'n', 'label', 'expiration'),
-                       'optional': ('value', 'first_period_reward', 'rate'),
+                       'optional': ('value', 'rate'),
                        'output': ('label', 'policy_encrypting_key')}
 
     __derive_policy_encrypting_key = {'input': ('label', ),
                                       'output': ('policy_encrypting_key', 'label')}
 
     __grant = {'input': ('bob_encrypting_key', 'bob_verifying_key', 'm', 'n', 'label', 'expiration'),
-               'optional': ('value', 'first_period_reward', 'rate'),
-               'output': ('treasure_map', 'policy_credential', 'policy_encrypting_key', 'alice_verifying_key')}
+               'optional': ('value', 'rate'),
+               'output': ('treasure_map', 'policy_encrypting_key', 'alice_verifying_key')}
 
     __revoke = {'input': ('label', 'bob_verifying_key', ),
                 'output': ('failed_revocations',)}
@@ -102,7 +102,6 @@ class BobSpecification(CharacterSpecification):
                      'output': ('policy_encrypting_key', )}
 
     __retrieve = {'input': ('label', 'policy_encrypting_key', 'alice_verifying_key', 'message_kit'),
-                  'optional': ('treasure_map',),
                   'output': ('cleartexts', )}
 
     __public_keys = {'input': (),

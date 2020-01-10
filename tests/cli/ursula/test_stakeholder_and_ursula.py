@@ -375,7 +375,9 @@ def test_collect_rewards_integration(click_runner,
     blockchain_alice.selection_buffer = 1
 
     M, N = 1, 1
-    expiration = maya.now() + datetime.timedelta(days=3)
+    days = 3
+    now = testerchain.w3.eth.getBlock(block_identifier='latest').timestamp
+    expiration = maya.MayaDT(now).add(days=days-1)
     blockchain_policy = blockchain_alice.grant(bob=blockchain_bob,
                                                label=random_policy_label,
                                                m=M, n=N,
@@ -449,7 +451,6 @@ def test_collect_rewards_integration(click_runner,
 
     # Collect Policy Reward
     collection_args = ('stake', 'collect-reward',
-                       '--mock-networking',
                        '--config-file', stakeholder_configuration_file_location,
                        '--policy-reward',
                        '--no-staking-reward',
@@ -481,7 +482,6 @@ def test_collect_rewards_integration(click_runner,
     balance_before_collecting = staker.token_agent.get_balance(address=staker_address)
 
     collection_args = ('stake', 'collect-reward',
-                       '--mock-networking',
                        '--config-file', stakeholder_configuration_file_location,
                        '--no-policy-reward',
                        '--staking-reward',

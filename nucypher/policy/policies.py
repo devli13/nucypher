@@ -1,21 +1,23 @@
+import math
 import random
 from abc import abstractmethod, ABC
 from collections import OrderedDict, deque
+from random import SystemRandom
 from typing import Generator, Set, List
 
 import maya
 from bytestring_splitter import BytestringSplitter, VariableLengthBytestring
-from constant_sorrow.constants import NOT_SIGNED, UNKNOWN_KFRAG, UNKNOWN_KFRAGS
+from constant_sorrow.constants import NOT_SIGNED, UNKNOWN_KFRAG, FEDERATED_POLICY, UNKNOWN_ARRANGEMENTS
 from umbral.keys import UmbralPublicKey
 from umbral.kfrags import KFrag
 
-from nucypher.blockchain.eth.actors import BlockchainPolicyAuthor
+from nucypher.blockchain.eth.actors import BlockchainPolicyAuthor, Staker
 from nucypher.blockchain.eth.agents import StakingEscrowAgent, PolicyManagerAgent
-from nucypher.blockchain.eth.interfaces import BlockchainInterface
-from nucypher.blockchain.eth.utils import datetime_at_period
+from nucypher.blockchain.eth.utils import calculate_period_duration
 from nucypher.characters.lawful import Alice, Ursula
 from nucypher.crypto.api import secure_random, keccak_digest
 from nucypher.crypto.constants import PUBLIC_KEY_LENGTH
+from nucypher.crypto.kits import RevocationKit
 from nucypher.crypto.powers import DecryptingPower, SigningPower
 from nucypher.crypto.utils import construct_policy_id
 from nucypher.network.exceptions import NodeSeemsToBeDown
@@ -27,7 +29,7 @@ class Arrangement:
     A Policy must be implemented by arrangements with n Ursulas.  This class tracks the status of that implementation.
     """
     federated = True
-    ID_LENGTH = 16
+    ID_LENGTH = 32
 
     splitter = BytestringSplitter((UmbralPublicKey, PUBLIC_KEY_LENGTH),  # alice.stamp
                                   (bytes, ID_LENGTH),  # arrangement_ID
@@ -97,9 +99,7 @@ class BlockchainArrangement(Arrangement):
     """
     A relationship between Alice and a single Ursula as part of Blockchain Policy
     """
-
     federated = False
-    ID_LENGTH = 16
 
     class InvalidArrangement(Exception):
         pass
@@ -107,7 +107,6 @@ class BlockchainArrangement(Arrangement):
     def __init__(self,
                  alice: Alice,
                  ursula: Ursula,
-                 first_period_reward: int,
                  rate: int,
                  expiration: maya.MayaDT,
                  duration_periods: int,
@@ -123,12 +122,11 @@ class BlockchainArrangement(Arrangement):
         # Arrangement rate and duration in periods
         self.rate = rate
         self.duration_periods = duration_periods
-        self.first_period_reward = first_period_reward
 
         # Status
-        self._is_published = False
+        self.is_published = False
         self.publish_transaction = None
-        self._is_revoked = True if ursula == BlockchainInterface.NULL_ADDRESS else False
+        self.is_revoked = False
         self.revoke_transaction = None
 
     def __repr__(self):
@@ -138,13 +136,12 @@ class BlockchainArrangement(Arrangement):
         return r
 
     def revoke(self) -> str:
-        """Revoke this arrangement on-chain and return the transaction receipt."""
-        receipt = self.policy_agent.revoke_arrangement(policy_id=self.id,
-                                                       author_address=self.author.checksum_address,
-                                                       node_address=self.ursula.checksum_address)
-        self.revoke_transaction = receipt
-        self._is_revoked = True
-        return receipt
+        """Revoke this arrangement and return the transaction hash as hex."""
+        # TODO: #1355 - Revoke arrangements only
+        txhash = self.policy_agent.revoke_policy(self.id, author_address=self.author.checksum_address)
+        self.revoke_transaction = txhash
+        self.is_revoked = True
+        return txhash
 
 
 class Policy(ABC):
@@ -160,7 +157,7 @@ class Policy(ABC):
     and generates a TreasureMap for the Policy, recording which Ursulas got a KFrag.
     """
 
-    ID_LENGTH = 16
+    POLICY_ID_LENGTH = 16
     _arrangement_class = NotImplemented
 
     class Rejected(RuntimeError):
@@ -171,7 +168,7 @@ class Policy(ABC):
                  label,
                  expiration: maya.MayaDT,
                  bob=None,
-                 kfrags=UNKNOWN_KFRAGS,
+                 kfrags=(UNKNOWN_KFRAG,),
                  public_key=None,
                  m: int = None,
                  alice_signature=NOT_SIGNED) -> None:
@@ -182,7 +179,6 @@ class Policy(ABC):
         """
         from nucypher.policy.collections import TreasureMap  # TODO: Circular Import
 
-        self.__id = None
         self.alice = alice                     # type: Alice
         self.label = label                     # type: bytes
         self.bob = bob                         # type: Bob
@@ -211,35 +207,11 @@ class Policy(ABC):
 
     @property
     def n(self) -> int:
-        if self.kfrags is not UNKNOWN_KFRAGS:
-            return len(self.kfrags)
-        elif self._published_arrangements:
-            return len(self._published_arrangements)
-        else:
-            raise RuntimeError(f"Cannot determine N-value for Policy.  "
-                               f"There are no KFrags and no Published Arrangements.")
+        return len(self.kfrags)
 
     @property
     def id(self) -> bytes:
-        if self.__id:
-            # Support for policies without Bob, but direct access to the ID.
-            return self.__id
-        elif self.bob:
-            return construct_policy_id(self.label, bytes(self.bob.stamp), truncate=self.ID_LENGTH)
-        else:
-            raise RuntimeError("Cannot determine policy ID. "
-                               "There is no Bob available and a manual policy ID is not set.")
-
-    @id.setter
-    def id(self, value: bytes):
-        """Allow the setting of a pre-existing known policy ID"""
-        if len(value) != self.ID_LENGTH:
-            raise ValueError(f"Invalid policy ID length. Expected {self.ID_LENGTH} got {len(value)}")
-        if self.bob:
-            self.__id = construct_policy_id(self.label, bytes(self.bob.stamp), truncate=self.ID_LENGTH)
-            if self.__id != value:
-                raise ValueError(f"Cannot set invalid policy ID '{value}' on policy {self.__id}.")
-        self.__id = value
+        return construct_policy_id(self.label, bytes(self.bob.stamp))
 
     @property
     def accepted_ursulas(self) -> Set[Ursula]:
@@ -305,23 +277,6 @@ class Policy(ABC):
         """
         return self.publish_treasure_map(network_middleware=network_middleware)
 
-    def credential(self, with_treasure_map=True):
-        """
-        Creates a PolicyCredential for portable access to the policy via
-        Alice or Bob. By default, it will include the treasure_map for the
-        policy unless `with_treasure_map` is False.
-        """
-        from nucypher.policy.collections import PolicyCredential
-        if with_treasure_map:
-            treasure_map = self.treasure_map
-        else:
-            treasure_map = None
-        return PolicyCredential(alice_stamp=self.alice.stamp,
-                                bob_stamp=self.bob.stamp,
-                                label=self.label,
-                                policy_encrypting_key=self.public_key,
-                                treasure_map=treasure_map)
-
     def __assign_kfrags(self) -> Generator[Arrangement, None, None]:
 
         if len(self._accepted_arrangements) < self.n:
@@ -354,13 +309,17 @@ class Policy(ABC):
                                                        arrangement.id,
                                                        policy_message_kit.to_bytes())
 
-            if response.status_code != 200:
+            if not response:
                 pass  # TODO: Parse response for confirmation.
 
             # Assuming response is what we hope for.
             self.treasure_map.add_arrangement(arrangement)
 
         else:  # ...After *all* the policies are enacted
+            # Create Alice's revocation kit
+            self.revocation_kit = RevocationKit(self, self.alice.stamp)
+            self.alice.add_active_policy(self)
+
             if publish is True:
                 return self.publish(network_middleware=network_middleware)
 
@@ -400,7 +359,7 @@ class Policy(ABC):
                                 f'- only {len(self._accepted_arrangements)} of {self.n} accepted.')
 
     @abstractmethod
-    def _make_arrangement(self, ursula: Ursula, *args, **kwargs):
+    def make_arrangement(self, ursula: Ursula, *args, **kwargs):
         raise NotImplementedError
 
     @abstractmethod
@@ -427,7 +386,7 @@ class Policy(ABC):
                                **kwargs) -> None:
 
         for index, selected_ursula in enumerate(candidate_ursulas):
-            arrangement = self._make_arrangement(ursula=selected_ursula, *args, **kwargs)
+            arrangement = self.make_arrangement(ursula=selected_ursula, *args, **kwargs)
             try:
                 is_accepted = self.consider_arrangement(ursula=selected_ursula,
                                                         arrangement=arrangement,
@@ -477,7 +436,7 @@ class FederatedPolicy(Policy):
         sampled_ursulas = set(random.sample(k=quantity, population=list(known_nodes)))
         return sampled_ursulas
 
-    def _make_arrangement(self, ursula: Ursula, *args, **kwargs):
+    def make_arrangement(self, ursula: Ursula, *args, **kwargs):
         return self._arrangement_class(alice=self.alice,
                                        expiration=self.expiration,
                                        ursula=ursula,
@@ -489,7 +448,6 @@ class BlockchainPolicy(Policy):
     A collection of n BlockchainArrangements representing a single Policy
     """
     _arrangement_class = BlockchainArrangement
-    selection_buffer = 1.5
 
     class NoSuchPolicy(Exception):
         pass
@@ -505,61 +463,53 @@ class BlockchainPolicy(Policy):
 
     def __init__(self,
                  alice: Alice,
+                 value: int,
                  rate: int,
-                 first_period_reward: int,
-                 value: int = None,  # TODO
-                 duration_periods: int = None,
-                 expiration: maya.MayaDT = None,
-                 verify_params: bool = True,
+                 duration_periods: int,
+                 expiration: maya.MayaDT,
                  *args, **kwargs):
 
-        self.first_period_reward = first_period_reward
         self.duration_periods = duration_periods
         self.expiration = expiration
-        self.rate = rate
         self.value = value
+        self.rate = rate
         self.author = alice
 
         # Initial State
         self.publish_transaction = None
-        self._is_published = False
-        self._is_revoked = None
+        self.is_published = False
         self.receipt = None
 
         super().__init__(alice=alice, expiration=expiration, *args, **kwargs)
 
-        if verify_params:
-            self.validate_reward_value()
+        self.selection_buffer = 1.5
+        self.validate_reward_value()
 
     def validate_reward_value(self) -> None:
-        rate_per_period = ((self.value // self.n) - self.first_period_reward)   # wei
-        if self.duration_periods > 0:
-            rate_per_period //= self.duration_periods
-        if rate_per_period <= self.first_period_reward:
-            raise ValueError(f"Policy rate ({rate_per_period} wei) is less then the initial reward ({self.first_period_reward})")
-
-        recalculated_value = ((self.duration_periods * rate_per_period) + self.first_period_reward) * self.n
+        rate_per_period = self.value // self.n // self.duration_periods  # wei
+        recalculated_value = self.duration_periods * rate_per_period * self.n
         if recalculated_value != self.value:
-            raise ValueError(f"Invalid policy value calculation.")  # TODO: Make a better suggestion.
+            raise ValueError(f"Invalid policy value calculation - "
+                             f"{self.value} can't be divided into {self.n} staker payments per period "
+                             f"for {self.duration_periods} periods without a remainder")
 
     @staticmethod
     def generate_policy_parameters(n: int,
                                    duration_periods: int,
-                                   first_period_reward: int = None,
                                    value: int = None,
                                    rate: int = None) -> dict:
 
         # Check for negative inputs
-        if sum(True for i in (n, duration_periods, first_period_reward, value, rate) if i is not None and i < 0) > 0:
+        if sum(True for i in (n, duration_periods, value, rate) if i is not None and i < 0) > 0:
             raise BlockchainPolicy.InvalidPolicyValue(f"Negative policy parameters are not allowed. Be positive.")
 
         # Check for policy params
-        if sum(True for i in (first_period_reward, value, rate) if i is not None) != 2:
+        if not bool(value) ^ bool(rate):
             # TODO: Review this suggestion
-            raise BlockchainPolicy.InvalidPolicyValue(f"Exactly two parameters must be provided to calculate policy value and rate.")
+            raise BlockchainPolicy.InvalidPolicyValue(f"Either 'value' or 'rate'  must be provided for policy.")
 
         if not value:
-            value = ((rate * duration_periods) + first_period_reward) * n
+            value = rate * duration_periods * n
 
         else:
             value_per_node = value // n
@@ -567,21 +517,13 @@ class BlockchainPolicy(Policy):
                 raise BlockchainPolicy.InvalidPolicyValue(f"Policy value of ({value} wei) cannot be"
                                                           f" divided by N ({n}) without a remainder.")
 
-            if not rate:
-                rate = (value_per_node - first_period_reward) // duration_periods
-                if rate * duration_periods + first_period_reward != value_per_node:
-                    raise BlockchainPolicy.InvalidPolicyValue(f"Policy value of ({value_per_node} wei) per node minus "
-                                                              f"first period reward ({first_period_reward} wei) "
-                                                              f"cannot be divided by duration ({duration_periods} periods)"
-                                                              f" without a remainder.")
-            else:
-                first_period_reward = value_per_node - (rate * duration_periods)
+            rate = value_per_node // duration_periods
+            if rate * duration_periods != value_per_node:
+                raise BlockchainPolicy.InvalidPolicyValue(f"Policy value of ({value_per_node} wei) per node "
+                                                          f"cannot be divided by duration ({duration_periods} periods)"
+                                                          f" without a remainder.")
 
-        if first_period_reward >= rate:
-            raise BlockchainPolicy.InvalidPolicyValue(f"Policy rate of ({rate} wei) per period must be greater than "
-                                                      f"the first period reward of ({first_period_reward} wei).")
-
-        params = dict(first_period_reward=first_period_reward, rate=rate, value=value)
+        params = dict(rate=rate, value=value)
         return params
 
     def __find_ursulas(self,
@@ -643,101 +585,26 @@ class BlockchainPolicy(Policy):
 
         # Transact
         receipt = self.author.policy_agent.create_policy(
-                       policy_id=self.id,                             # bytes16 _policyID
+                       policy_id=self.hrac()[:16],          # bytes16 _policyID
                        author_address=self.author.checksum_address,
                        value=self.value,
-                       periods=self.duration_periods,                 # uint16 _numberOfPeriods
-                       first_period_reward=self.first_period_reward,  # uint256 _firstPartialReward
-                       node_addresses=prearranged_ursulas             # address[] memory _nodes
+                       end_timestamp=self.expiration.epoch,           # uint16 _numberOfPeriods
+                       node_addresses=prearranged_ursulas   # address[] memory _nodes
         )
 
         # Capture Response
         self.receipt = receipt
         self.publish_transaction = receipt['transactionHash']
+        self.is_published = True  # TODO: For real: TX / Swarm confirmations needed?
 
-        # Call super publish (currently encrypts for Bob and publishes TMap)
+        # Call super publish (currently publishes TMap)
         super().publish(network_middleware=self.alice.network_middleware)
-
-        self.sync()
         return receipt
 
-    def revoke(self) -> dict:
-        """Revoke the policy on-chain and update the local state, returning the receipt"""
-        receipt = self.alice.revoke_policy(policy_id=self.id)
-        self.revoke_transaction = receipt['transactionHash']
-        self.sync()
-        return receipt
-
-    def _make_arrangement(self, ursula: Ursula, *args, **kwargs) -> BlockchainArrangement:
+    def make_arrangement(self, ursula: Ursula, *args, **kwargs):
         return self._arrangement_class(alice=self.alice,
                                        expiration=self.expiration,
                                        ursula=ursula,
                                        rate=self.rate,
                                        duration_periods=self.duration_periods,
-                                       first_period_reward=self.first_period_reward,
                                        *args, **kwargs)
-
-    def _read_arrangements(self, alice, policy_id: bytes) -> List[BlockchainArrangement]:
-        if len(policy_id) != self.ID_LENGTH:
-            raise ValueError(f'Invalid policy ID length - Expected {self.ID_LENGTH} got length {len(policy_id)}')
-        arrangements = list()
-        arrangement_infos = list(alice.policy_agent.fetch_policy_arrangements(policy_id=policy_id))
-        for ursula_address, last_downtime_period, last_refund_period in arrangement_infos:
-            try:
-                ursula = alice.known_nodes[ursula_address]
-            except KeyError:
-                if ursula_address != BlockchainInterface.NULL_ADDRESS:
-                    raise self.NotEnoughBlockchainUrsulas(f"Cannot read on-chain arrangement - "
-                                                          f"{ursula_address} is not a known node.")
-                else:
-                    ursula = BlockchainInterface.NULL_ADDRESS
-            arrangement = self._make_arrangement(ursula=ursula)
-            arrangements.append(arrangement)
-        return arrangements
-
-    @classmethod
-    def from_alice_and_policy_details(cls, alice: Alice, policy_id: bytes, *args, **kwargs) -> 'BlockchainPolicy':
-        if len(policy_id) != cls.ID_LENGTH:
-            raise ValueError(f'Invalid policy ID length - Expected {cls.ID_LENGTH} got length {len(policy_id)}')
-
-        policy_record = list(alice.policy_agent.fetch_policy(policy_id=policy_id))
-        author_address, rate, first_period_reward, initial_period, terminal_period, is_disabled = policy_record
-        duration_periods = terminal_period - initial_period
-        expiration = datetime_at_period(period=terminal_period, seconds_per_period=alice.economics.seconds_per_period)
-
-        instance = cls(alice=alice,
-                       expiration=expiration,
-                       duration_periods=duration_periods,
-                       rate=rate,
-                       first_period_reward=first_period_reward,
-                       verify_params=False,
-                       *args, **kwargs)
-
-        arrangements = instance._read_arrangements(alice=alice, policy_id=policy_id)
-        instance.id = policy_id
-        instance._published_arrangements = arrangements
-        instance._is_published = True
-        instance._is_revoked = is_disabled
-        return instance
-
-    @classmethod
-    def from_alice_and_credential(cls, alice: Alice, policy_credential: "PolicyCredential") -> 'BlockchainPolicy':
-        if bytes(alice.stamp) != bytes(policy_credential.alice_stamp):
-            raise ValueError(f"Cannot load policy with verifying key for another Alice.")
-        instance = cls.from_alice_and_policy_details(alice=alice,
-                                                     policy_id=policy_credential.id,
-                                                     label=policy_credential.label)
-
-        if policy_credential.treasure_map is not None:  # Do not evaluate __len__ of TMap
-            instance.treasure_map = policy_credential.treasure_map
-        return instance
-
-    def sync(self):
-        policy_record = list(self.alice.policy_agent.fetch_policy(policy_id=self.id))
-        author_address, rate, first_period_reward, initial_period, terminal_period, is_disabled = policy_record
-        self.duration_periods = terminal_period - initial_period
-        self.expiration = datetime_at_period(period=terminal_period,
-                                             seconds_per_period=self.author.economics.seconds_per_period)
-        self._published_arrangements = self._read_arrangements(alice=self.author, policy_id=self.id)
-        self._is_published = True
-        self._is_revoked = is_disabled
